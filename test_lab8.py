@@ -112,7 +112,7 @@ def main():
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
-    exe_path = repo_root / "lab8" / "lab8.exe"
+    exe_path = repo_root / "lab8" / "lab8"
     if not exe_path.exists():
         print(f"Executable not found: {exe_path}")
         return 2
