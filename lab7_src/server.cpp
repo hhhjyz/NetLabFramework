@@ -7,27 +7,45 @@
 #include <map>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
+#include <csignal>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "protocol.h"
 
-#define SERVER_PORT 8080
+#define SERVER_PORT 2996
 
 // 全局变量：存储在线客户端 <SocketFD, IP:Port>
 std::map<int, std::string> online_clients;
 std::mutex clients_mtx;
 
+// 全局退出标志
+std::atomic<bool> server_running(true);
+int server_fd = -1;
+
+// 信号处理函数
+void signal_handler(int signum) {
+    std::cout << "\n[Info] Received signal " << signum << ", shutting down server..." << std::endl;
+    server_running = false;
+    
+    // 关闭服务器socket，使accept()返回错误
+    if (server_fd != -1) {
+        close(server_fd);
+        server_fd = -1;
+    }
+}
+
 // 辅助函数：确保读取指定长度的数据（处理 TCP 拆包）
 bool recv_full(int sock, char* buffer, size_t length) {
     size_t total_read = 0;
-    while (total_read < length) {
+    while (total_read < length && server_running) {
         int valread = recv(sock, buffer + total_read, length - total_read, 0);
         if (valread <= 0) return false; // 连接断开或错误
         total_read += valread;
     }
-    return true;
+    return total_read == length;
 }
 
 // 辅助函数：发送协议包
@@ -70,7 +88,7 @@ void client_handler(int client_sock, std::string client_addr) {
 
     bool is_running = true; // 控制循环的标志
 
-    while (is_running) {
+    while (is_running && server_running) {
         // === 协议嗅探与边界识别 ===
         char header_buf[HEADER_SIZE];
         
@@ -190,9 +208,12 @@ void client_handler(int client_sock, std::string client_addr) {
 }
 
 int main() {
-    int server_fd;
     struct sockaddr_in address;
     int opt = 1;
+
+    // 注册信号处理函数（检测退出指令）
+    signal(SIGINT, signal_handler);   // Ctrl+C
+    signal(SIGTERM, signal_handler);  // kill 命令
 
     // 创建 Socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -223,14 +244,20 @@ int main() {
     }
 
     std::cout << "Lab7 Server (Protocol Aware) listening on " << SERVER_PORT << "..." << std::endl;
+    std::cout << "[Info] Press Ctrl+C to shutdown server." << std::endl;
 
-    while (true) {
+    // 保存客户端处理线程
+    std::vector<std::thread> client_threads;
+
+    while (server_running) {
         struct sockaddr_in client_addr;
         socklen_t addrlen = sizeof(client_addr);
         int client_sock = accept(server_fd, (struct sockaddr *)&client_addr, &addrlen);
         
         if (client_sock < 0) {
-            perror("accept failed");
+            if (server_running) {
+                perror("accept failed");
+            }
             continue;
         }
 
@@ -240,5 +267,16 @@ int main() {
         std::thread(client_handler, client_sock, ip_port).detach();
     }
 
+    // 服务器关闭：关闭所有客户端连接
+    std::cout << "[Info] Closing all client connections..." << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(clients_mtx);
+        for (const auto& client : online_clients) {
+            close(client.first);
+        }
+        online_clients.clear();
+    }
+
+    std::cout << "[Info] Server shutdown complete." << std::endl;
     return 0;
 }
